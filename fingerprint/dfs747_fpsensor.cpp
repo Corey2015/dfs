@@ -22,6 +22,11 @@
 #include "fp_api.h"         // 新算法接口
 #include "fps_driver.h"
 
+// for new version code
+#include "fps.h"
+#include "fps_control.h"
+//
+
 #define use fp_algo
 #define MAX_PATH_LEN 256
 //--------- 算法所需资源相关配置，不能修改 ----------------------------------------
@@ -47,7 +52,7 @@
 #define DETECT_WINDOW_ROWS    (8)
 
 extern fp_core_t fp_core;
-extern int init_sensor(int dev_fd);
+
 extern int fps_multiple_read(const int     fd,
                   const uint8_t *addr,
                   uint8_t       *data,
@@ -142,10 +147,17 @@ static int calibrate_image(int32_t dev_fd,dfs_calibration_t *dfs_cal);
 static int write_template_info(const char* path,unsigned char *buf,int size);
 static int read_template_info(const char* path,unsigned char *buf,int size);
 
+//star for new version code
+static fps_handle_t* fps_handle_init(int dev_fd);
+//static int init_sensor(fps_handle_t *handle);
+//end for new version code
 ////////////////////////////////////////////////
 //
 //Global Variables
 //
+//star for new version code
+fps_handle_t *fps_handle;
+//end for new version code
 static uint16_t     det_cds_offset       = 0;
 static uint8_t      det_detect_th        = 0;
 static double       det_sleep_us         = 0.0;
@@ -153,6 +165,52 @@ static uint16_t     det_extra_cds_offset = 0;
 static uint32_t     recal_secs           = 30;
 static uint32_t     detect_cnt           = 0;
 
+//new version code function
+static fps_handle_t* fps_handle_init(int dev_fd){
+  int sensor_size;
+  fps_handle_t *handle;
+
+  handle = (fps_handle_t *) malloc(sizeof(fps_handle_t));
+  if (handle == NULL){
+    goto init_error;
+  }
+  handle->fd = dev_fd;
+  handle->chip_id = F747B_CHIP_ID;
+  switch (handle->chip_id) {
+    case F747B_CHIP_ID :
+      handle->sensor_width    = 144;
+      handle->sensor_height   = 64;
+      handle->latency         = 1;
+      handle->power_config    = FPS_POWER_CONFIG_1V8_3V3;
+      handle->img_cal_method  = 2;
+      handle->det_cal_method  = 4;
+      handle->scan_det_method = 1;
+      break;
+
+    default :
+      goto init_error;
+  }
+  sensor_size = handle->sensor_width * handle->sensor_height;
+
+  handle->bkgnd_img = (uint8_t *) malloc(sizeof(uint8_t) * sensor_size);
+  if (handle->bkgnd_img == NULL) {
+      goto init_error;
+  }
+  return handle;
+
+init_error:
+  if (handle != NULL) {
+    if (handle->bkgnd_img != NULL) {
+      free(handle->bkgnd_img);
+    }
+    free(handle);
+  }
+
+  return NULL;
+
+}
+
+//End for new version code
 struct tmpl_sort {
   uint8_t * pFeature_data;
   template_info_t tmpl_info;
@@ -463,18 +521,28 @@ int32_t dfs747_sensor_init(fingerprint_data_t* device)
 {
 	fpsensor_handle_internal_t* tac_handle = (fpsensor_handle_internal_t*) device->tac_handle;
 
-	int32_t status;
+	int32_t status = 0;
 	struct timeval ts_start;
 	struct timeval ts_current;
 	struct timeval ts_delta;
 	int delta_us = 0;
-    int mode_old;
+    //int mode_old;
 
 	if (device->kpi_enabled) {
 		gettimeofday(&ts_start, NULL);
 	}
 
-	init_sensor(device->sysfs_fd);
+  //for new version
+  fps_handle = fps_handle_init(device->sysfs_fd);
+  ALOGD("init test %d,%d",fps_handle->sensor_width,fps_handle->sensor_height);
+  if (fps_handle == NULL){
+    ALOGD("fps_handle_init failed ");
+    return -1;
+  }
+	status = fps_init_sensor(fps_handle);
+  ALOGD("init status = %d",status);
+  //end
+
 	if (device->kpi_enabled) {
 		gettimeofday(&ts_current, NULL);
 		timersub(&ts_current, &ts_start, &ts_delta);
@@ -2016,8 +2084,11 @@ int32_t dfs747_calibrate(fingerprint_data_t* device,const char *store_path)
 
 	int32_t status;
     int mode_old;
+  //for new version code
+  fps_init_sensor(fps_handle);
+  //init_sensor(device->sysfs_fd);
+  //end
 
-	init_sensor(device->sysfs_fd);
 	ALOGD("store_path %s",store_path);
   //set calibrate_image frist for 747B
   status = calibrate_image(device->sysfs_fd,&tac_handle->dfs_cal);
