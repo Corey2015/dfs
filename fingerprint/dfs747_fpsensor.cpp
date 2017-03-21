@@ -534,7 +534,7 @@ int32_t dfs747_sensor_init(fingerprint_data_t* device)
 
   //for new version
   fps_handle = fps_handle_init(device->sysfs_fd);
-  ALOGD("init test %d,%d",fps_handle->sensor_width,fps_handle->sensor_height);
+  //ALOGD("init test %d,%d",fps_handle->sensor_width,fps_handle->sensor_height);
   if (fps_handle == NULL){
     ALOGD("fps_handle_init failed ");
     return -1;
@@ -622,361 +622,86 @@ int setup_calibrate_regs(int32_t dev_fd,dfs_calibration_t dfs_cal)
 
 int calibrate_detect(int32_t dev_fd,dfs_calibration_t *dfs_cal)
 {
-  int            status           = 0;
-  char           key              = 0;
-  char           line[CHAR_CNT];
-  char           *arg             = NULL;
-  int            user_input       = 0;
-  uint16_t       det_frame        = 4;
-  int            scan_limit       = 8;
-  int            scan_cnt         = 0;
-  uint8_t        addr[4];
-  uint8_t        data[4];
-  int            mode_old         = 0;
-  double         win_dev          = 0.0;
-  uint8_t        row_begin        = (DFS747_SENSOR_ROWS / 2) - (DETECT_WINDOW_ROWS / 2);
-  uint8_t        row_end          = (DFS747_SENSOR_ROWS / 2) + (DETECT_WINDOW_ROWS / 2) - 1;
-  uint8_t        col_begin        = (DFS747_SENSOR_COLS / 2) - (DETECT_WINDOW_COLS / 2);
-  uint8_t        col_end          = (DFS747_SENSOR_COLS / 2) + (DETECT_WINDOW_COLS / 2) - 1;
-  size_t         det_size         = 16;
-  uint16_t       cds_offset       = DFS747_MAX_CDS_OFFSET;
-  uint8_t        detect_th        = DFS747_MAX_DETECT_TH;
-  double         sleep_us         = 0.0;
-  struct timeval start_time;
-  struct timeval stop_time;
-  double         elapsed          = 0.0;
-  uint16_t       extra_cds_offset = 6;
-  uint8_t        extra_detect_th  = 1;
-  int            int_enable       = 1;
-  int            fine_tune_enable = 1;
-  int            cal_success      = 1;
-  int            double_sense     = 0;
-  int            finger_on        = 0;
-  int            finger_off       = 0;
-  uint8_t        det_max;
-  uint8_t        det_min;
-  uint8_t        det_upper;
-  uint8_t        det_middle;
-  uint8_t        det_lower;
-  uint16_t       cds_max;
-  uint16_t       cds_min;
-  uint16_t       cds_upper;
-  uint16_t       cds_middle;
-  uint16_t       cds_lower;
-  int            retry_limit      = 10;
-  int            retry_cnt        = 0;
-  int            sleep_mul        = 2;
+  const int DEFAULT_FRAMES_TO_SUSPEND = 2;
+  const int DEFAULT_DETECT_WIDTH              = 8;
+  const int DEFAULT_DETECT_HEIGHT             = 8;
+  int status = 0;
+  int detect_th;
+  int det_width;
+  int det_height;
+  int frms_to_susp;
+  int cds_offset;
+  int det_col_begin;
+  int det_col_end;
+  int det_row_begin;
+  int det_row_end;
+  int mode_old;
+  struct timeval  start_time;
+  struct timeval  stop_time;
+  double elapsed;
 
-  ALOGD("detect    Calibrating...\n");
+  det_width    = DEFAULT_DETECT_WIDTH;
+  det_height   = DEFAULT_DETECT_HEIGHT;
+  frms_to_susp = DEFAULT_FRAMES_TO_SUSPEND;
 
-  // Disable all interrupts
-  status = fps_single_write(dev_fd, DFS747_REG_INT_CTL, 0x00);
+  ALOGD("Detect calibrating...");
+
+  (void) gettimeofday(&start_time, NULL);
+
+  status = fps_switch_mode(fps_handle, FPS_DETECT_MODE, &mode_old);
   if (status < 0) {
-      goto calibrate_detect_error;
+      return status;
   }
 
-  // Copy the settings from the Image Calibration
-  addr[0] = DFS747_REG_IMG_CDS_CTL_0;
-  addr[1] = DFS747_REG_IMG_CDS_CTL_1;
-  addr[2] = DFS747_REG_IMG_PGA0_CTL;
-  addr[3] = DFS747_REG_IMG_PGA1_CTL;
+  status = fps_detect_calibration(fps_handle,
+                                  det_width,
+                                  det_height,
+                                  frms_to_susp);
 
-  status = fps_multiple_read(dev_fd, addr, data, 4);
+  status = fps_switch_mode(fps_handle, mode_old, NULL);
   if (status < 0) {
-      goto calibrate_detect_error;
+      return status;
   }
 
-  addr[0] = DFS747_REG_DET_CDS_CTL_0;
-  addr[1] = DFS747_REG_DET_CDS_CTL_1;
-  addr[2] = DFS747_REG_DET_PGA0_CTL;
-  addr[3] = DFS747_REG_DET_PGA1_CTL;
-
-  data[0] = 0x00;
-  data[1] = 0xFF;
-  data[2] = 0x00;
-  data[3] = 0x02;
-
-  cds_offset = (((uint16_t) (data[0] & 0x80)) << 1) | ((uint16_t) data[1]);
-
-  status = fps_multiple_write(dev_fd, addr, data, 4);
-  if (status < 0) {
-      goto calibrate_detect_error;
-  }
-
-  // Set Double Sensitivity
-  status = fps_single_read(dev_fd, DFS747_REG_DET_PGA0_CTL, &data[0]);
-  if (status < 0) {
-      goto calibrate_detect_error;
-  }
-
-  if (double_sense > 0) {
-      data[0] |=  (1 << 5);
-  } else {
-      data[0] &= ~(1 << 5);
-  }
-
-  status = fps_single_write(dev_fd, DFS747_REG_DET_PGA0_CTL, data[0]);
-  if (status < 0) {
-      goto calibrate_detect_error;
-  }
-
-  // Set suspend interval
-  addr[0] = DFS747_REG_SUSP_WAIT_F_CYC_H;
-  addr[1] = DFS747_REG_SUSP_WAIT_F_CYC_L;
-
-  data[0] = (uint8_t) ((det_frame & 0xFF00) >> 8);
-  data[1] = (uint8_t) ((det_frame & 0x00FF) >> 0);
-
-  status = fps_multiple_write(dev_fd, addr, data, 2);
-  if (status < 0) {
-      goto calibrate_detect_error;
-  }
-
-  det_size = (col_end - col_begin + 1) * (row_end - row_begin + 1);
-
-  // Assume the slowest oscillator frequency is 250KHz, i.e. 4us
-  sleep_us = (double) (det_size * (1 + det_frame) * 8 * 4) * sleep_mul;
-
-  // Start time measurement
-  status = gettimeofday(&start_time, NULL);
-  if (status < 0) {
-      goto calibrate_detect_error;
-  }
-
-  // Use the background image to search the best detect window
-  status = fps_search_detect_window_from_bkgnd_image(col_begin, col_end,
-                                                     &row_begin, &row_end,
-                                                     NULL, &win_dev);
-  if (status < 0) {
-      goto calibrate_detect_error;
-  }
-
-  // Set detect line
-  addr[0] = DFS747_REG_DET_ROW_BEGIN;
-  addr[1] = DFS747_REG_DET_ROW_END;
-  addr[2] = DFS747_REG_DET_COL_BEGIN;
-  addr[3] = DFS747_REG_DET_COL_END;
-
-  data[0] = row_begin;
-  data[1] = row_end;
-  data[2] = col_begin;
-  data[3] = col_end;
-
-  status = fps_multiple_write(dev_fd, addr, data, 4);
-  if (status < 0) {
-      goto calibrate_detect_error;
-  }
-
-  // Switch to detect mode
-#if 0
-  status = fps_switch_mode(dev_fd, DFS747_DETECT_MODE, &mode_old);
-  if (status < 0) {
-      goto calibrate_detect_error;
-  }
-#else
-  status = fps_switch_mode(dev_fd, DFS747_POWER_DOWN_MODE, &mode_old);
-  status = fps_switch_mode(dev_fd, DFS747_DETECT_MODE, NULL);
-  if (status < 0) {
-      goto calibrate_detect_error;
-  }
-#endif
-
-  for (retry_cnt = 0; retry_cnt < retry_limit; retry_cnt++) {
-
-      det_max = DFS747_MAX_DETECT_TH;
-      det_min = DFS747_MIN_DETECT_TH;
-
-      det_upper  = det_max;
-      det_lower  = det_min;
-      det_middle = (det_upper + det_lower) / 2;
-
-      while ((det_upper - det_lower) > 2) {
-          for (scan_cnt = 0; scan_cnt < scan_limit; scan_cnt++) {
-              status = fps_scan_detect_event(dev_fd, det_middle, cds_offset,
-                                             sleep_us, int_enable, (scan_cnt == 0));
-              if (status < 0) {
-                  goto calibrate_detect_error;
-              }
-
-              if ((status > 0) && (scan_cnt > 2)) {
-                  break;
-              }
-          }
-
-          ALOGD("1. Detect Th. = 0x%02X, CDS Offset = 0x%03X, finger_on = %0d, finger_off = %0d\n",
-                det_middle, cds_offset, finger_on, finger_off);
-
-          if (scan_cnt == scan_limit) {
-              det_upper  = det_middle;
-              det_middle = (det_upper + det_lower) / 2;
-          } else {
-              det_lower  = det_middle;
-              det_middle = (det_upper + det_lower) / 2;
-          }
-      }
-
-      if (det_middle >= det_max) {
-          ALOGD("Maximum Detect Threshold reached! Retry...\n");
-          usleep(sleep_us);
-          continue;
-      }
-      if (det_middle <= det_min) {
-          ALOGD("Minimum Detect Threshold reached! Retry...\n");
-          usleep(sleep_us);
-          continue;
-      }
-
-      detect_th = det_middle + extra_detect_th;
-      if (detect_th > DFS747_MAX_DETECT_TH) {
-          detect_th = DFS747_MAX_DETECT_TH;
-      }
-      if (detect_th < DFS747_MIN_DETECT_TH) {
-          detect_th = DFS747_MIN_DETECT_TH;
-      }
-
-      break;
-  }
-
-  if (retry_cnt == retry_limit) {
-      ALOGD("Retry time out! Exit...\n");
-      goto calibrate_detect_error;
-  }
-
-  if (fine_tune_enable > 0) {
-      for (; retry_cnt < retry_limit; retry_cnt++) {
-
-          cds_max = DFS747_MAX_CDS_OFFSET / 2;
-          cds_min = DFS747_MIN_CDS_OFFSET;
-
-          cds_upper  = cds_max;
-          cds_lower  = cds_min;
-          cds_middle = (cds_upper + cds_lower) / 2;
-
-#if 0
-          while ((cds_upper - cds_lower) > 2) {
-              finger_on  = 0;
-              finger_off = 0;
-              for (scan_cnt = 0; scan_cnt < scan_limit; scan_cnt++) {
-                  status = fps_scan_detect_event(dev_fd, detect_th, cds_middle,
-                                                 sleep_us, int_enable, (scan_cnt == 0));
-                  if (status < 0) {
-                      goto calibrate_detect_error;
-                  }
-
-                  if (scan_cnt > 0) {
-                      if (status > 0) {
-                          finger_on++;
-                      } else {
-                          finger_off++;
-                      }
-                  }
-              }
-
-              ALOGD("2. Detect Th. = 0x%02X, CDS Offset = 0x%03X, finger_on = %0d, finger_off = %0d\n",
-                    detect_th, cds_middle, finger_on, finger_off);
-
-              if (finger_on < finger_off) {
-                  cds_upper  = cds_middle;
-                  cds_middle = (cds_upper + cds_lower) / 2;
-              }
-
-              if (finger_off < finger_on) {
-                  cds_lower  = cds_middle;
-                  cds_middle = (cds_upper + cds_lower) / 2;
-              }
-          }
-#else
-          while ((cds_upper - cds_lower) > 2) {
-              for (scan_cnt = 0; scan_cnt < scan_limit; scan_cnt++) {
-                  status = fps_scan_detect_event(dev_fd, detect_th, cds_middle,
-                                                 sleep_us, int_enable, (scan_cnt == 0));
-                  if (status < 0) {
-                      goto calibrate_detect_error;
-                  }
-
-                  if ((status == 0) && (scan_cnt > 0)) {
-                      break;
-                  }
-              }
-
-              ALOGD("2. Detect Th. = 0x%02X, CDS Offset = 0x%03X, finger_on = %0d, finger_off = %0d\n",
-                    detect_th, cds_middle, finger_on, finger_off);
-
-              if (scan_cnt == scan_limit) {
-                  cds_lower  = cds_middle;
-                  cds_middle = (cds_upper + cds_lower) / 2;
-              } else {
-                  cds_upper  = cds_middle;
-                  cds_middle = (cds_upper + cds_lower) / 2;
-              }
-          }
-#endif
-
-          if (cds_middle >= cds_max) {
-              ALOGD("Maximum CDS Offset reached! Retry...\n");
-              usleep(sleep_us);
-              continue;
-          }
-          if (cds_middle <= cds_min) {
-              ALOGD("Minimum CDS Offset reached! Retry...\n");
-              usleep(sleep_us);
-              continue;
-          }
-
-          cds_offset = cds_middle + extra_cds_offset;
-          if (cds_offset > DFS747_MAX_CDS_OFFSET) {
-              cds_offset = DFS747_MAX_CDS_OFFSET;
-          }
-          if (cds_offset < DFS747_MIN_CDS_OFFSET) {
-              cds_offset = DFS747_MIN_CDS_OFFSET;
-          }
-
-          break;
-      }
-
-      if (retry_cnt == retry_limit) {
-          ALOGD("Retry time out! Exit...\n");
-          goto calibrate_detect_error;
-      }
-  }
-
-  // Fill the result to the registers
-  addr[0] = DFS747_REG_DET_CDS_CTL_0;
-  addr[1] = DFS747_REG_DET_CDS_CTL_1;
-  addr[2] = DFS747_REG_V_DET_SEL;
-
-  status = fps_multiple_read(dev_fd, addr, data, 3);
-  if (status < 0) {
-      goto calibrate_detect_error;
-  }
-
-  data[0] = (data[0] & 0x7F) | ((uint8_t) ((cds_offset & 0x0100) >> 1));
-  data[1] = (uint8_t) (cds_offset & 0x00FF);
-  data[2] = detect_th;
-
-  status = fps_multiple_write(dev_fd, addr, data, 3);
-  if (status < 0) {
-      goto calibrate_detect_error;
-  }
-
-  // Stop time measurement
-  status = gettimeofday(&stop_time, NULL);
-  if (status < 0) {
-      goto calibrate_detect_error;
-  }
-
+  (void) gettimeofday(&stop_time, NULL);
   elapsed = get_elapsed_ms(&start_time, &stop_time);
-  if (elapsed < 0) {
-      goto calibrate_detect_error;
+
+
+  if (status < 0) {
+      printf("    Failed!\n");
+  } else {
+      // Get final detect window
+      (void) fps_get_sensing_area(fps_handle, FPS_DETECT_MODE,
+                                  &det_col_begin, &det_col_end,
+                                  &det_row_begin, &det_row_end);
+
+      // Get final Detect Threshold
+      (void) fps_get_sensor_parameter(fps_handle,
+                                      FPS_PARAM_DETECT_THRESHOLD,
+                                      &detect_th);
+
+      // Get final CDS Offset
+      (void) fps_get_sensor_parameter(fps_handle,
+                                      (FPS_DETECT_MODE | FPS_PARAM_CDS_OFFSET_1),
+                                      &cds_offset);
+
+      ALOGD("    Successful!");
+      ALOGD("    Window (CB,RB):(CE,RE) = (%0d,%0d):(%0d,%0d)",
+             det_col_begin, det_row_begin, det_col_end, det_row_end);
+      ALOGD("    Detect Threshold       = 0x%02X", detect_th);
+      ALOGD("    CDS Offset 1           = 0x%03X", cds_offset);
+      ALOGD("    Time Elapsed           = %0.3f ms", elapsed);
   }
+
   dfs_cal->detect_magic_num = DETECT_DATA_MAGIC;
   dfs_cal->detect_cds_offset = cds_offset;
   dfs_cal->detect_thrshld= detect_th;
-  dfs_cal->suspend_interval= det_frame;
+  //dfs_cal->suspend_interval= det_frame;
   det_detect_th        = detect_th;
   det_cds_offset       = cds_offset;
-  det_sleep_us         = sleep_us;
-  det_extra_cds_offset = extra_cds_offset;
+  //det_sleep_us         = sleep_us;
+  //det_extra_cds_offset = extra_cds_offset;
+  /*
   ALOGD("    Done!\n");
   ALOGD("\n");
   ALOGD("    Selected Row (Begin/End) = %0d/%0d\n", row_begin, row_end);
@@ -984,313 +709,72 @@ int calibrate_detect(int32_t dev_fd,dfs_calibration_t *dfs_cal)
   ALOGD("    CDS Offset               = 0x%03X\n",  cds_offset);
   ALOGD("\n");
   ALOGD("    Time elapsed = %0.3f ms\n", elapsed);
-
-return status;
-
-calibrate_detect_error :
-
-    ALOGD("\n");
-    ALOGD("calibrate_detect    Failed!\n");
-    ALOGD("\n");
-
-    return status;
-
+  */
+  return status;
 }
 
 int calibrate_image(int32_t dev_fd,dfs_calibration_t *dfs_cal)
 {
-  int            status              = 0;
-  char           *arg                = NULL;
-  int            user_input_i[2]     = {0, 0};
-  double         user_input_f        = 0.0;
-  uint8_t        upper_bond          = 240;
-  uint8_t        lower_bond          = 10;
-  uint8_t        row_scan_begin      = DFS747_SENSOR_ROWS * 1/4;
-  uint8_t        row_scan_end        = DFS747_SENSOR_ROWS * 3/4 - 1;
-  uint8_t        col_scan_begin      = DFS747_SENSOR_COLS * 1/4;
-  uint8_t        col_scan_end        = DFS747_SENSOR_COLS * 3/4 - 1;
-  uint32_t       scan_size           = DFS747_SENSOR_SIZE * 1/4;
-  double         ratio               = 0.05;
-  uint8_t        addr[4];
-  uint8_t        data[4];
-  int            mode_old            = 0;
-  uint8_t        row_begin           = 0;
-  uint8_t        row_end             = DFS747_SENSOR_ROWS - 1;
-  uint8_t        col_begin           = 0;
-  uint8_t        col_end             = DFS747_SENSOR_COLS - 1;
-  uint32_t       img_width           = DFS747_SENSOR_COLS;
-  uint32_t       img_height          = DFS747_SENSOR_ROWS;
-  uint32_t       img_size            = DFS747_SENSOR_SIZE;
-  uint8_t        avg_frame           = 1;
-  uint8_t        **raw_buf           = NULL;
-  uint8_t        **img_buf           = NULL;
-  uint8_t        *avg_img            = NULL;
-  double         sum                 = 0.0;
-  uint16_t       cds_offset          = DFS747_MAX_CDS_OFFSET;
-  uint8_t        pga_gain            = DFS747_MAX_PGA_GAIN;
-  uint32_t       pix_cnt_over_upper  = 0;
-  uint32_t       pix_cnt_under_lower = 0;
-  int            img_too_dark        = 1;
-  int            img_too_bright      = 1;
-  struct timeval start_time;
-  struct timeval stop_time;
-  double         elapsed             = 0.0;
-  int            cal_success         = 0;
-  int            i;
-  int            f;
-  int            r;
-  int            c;
-
+  int status = 0;
+  int mode_old;
+  int img_width;
+  int img_height;
+  int frms_to_avg;
+  struct timeval  start_time;
+  struct timeval  stop_time;
+  int cds_offset;
+  int pga_gain;
+  double elapsed;
+  int img_size;
   ALOGD("image   Calibrating...\n");
-	// Set image window
-  addr[0] = DFS747_REG_IMG_ROW_BEGIN;
-  addr[1] = DFS747_REG_IMG_ROW_END;
-  addr[2] = DFS747_REG_IMG_COL_BEGIN;
-  addr[3] = DFS747_REG_IMG_COL_END;
 
-  data[0] = row_begin;
-  data[1] = row_end;
-  data[2] = col_begin;
-  data[3] = col_end;
+  (void) gettimeofday(&start_time, NULL);
 
-  status = fps_multiple_write(dev_fd, addr, data, 4);
+  status = fps_switch_mode(fps_handle, FPS_IMAGE_MODE, &mode_old);
   if (status < 0) {
-      goto calibrate_image_error;
+      return status;
   }
 
-  img_width  = col_end - col_begin + 1;
-  img_height = row_end - row_begin + 1;
-  img_size   = img_width * img_height;
+  img_width   = fps_handle->sensor_width;
+  img_height  = fps_handle->sensor_height;
+  frms_to_avg = 1;
+  img_size = img_width * img_height;
 
-  raw_buf = (uint8_t **) malloc(sizeof(uint8_t *) * avg_frame);
-  if (raw_buf == NULL) {
-      status = -1;
-      goto calibrate_image_error;
+  status = fps_image_calibration(fps_handle,
+                                 img_width,
+                                 img_height,
+                                 frms_to_avg);
+
+  status = fps_switch_mode(fps_handle, mode_old, NULL);
+  (void) gettimeofday(&stop_time, NULL);
+  elapsed = get_elapsed_ms(&start_time, &stop_time);
+  if (status < 0) {
+      ALOGD("calibrate image failed");
+      return status;
+  }else{
+    // Get final CDS offset
+    (void) fps_get_sensor_parameter(fps_handle,
+                                    (FPS_IMAGE_MODE | FPS_PARAM_CDS_OFFSET_1),
+                                    &cds_offset);
+
+    // Get final PGA gain
+    (void) fps_get_sensor_parameter(fps_handle,
+                                    (FPS_IMAGE_MODE | FPS_PARAM_PGA_GAIN_1),
+                                    &pga_gain);
+    memcpy(dfs_cal->bkg_img, fps_handle->bkgnd_img, img_size);
+    dfs_cal->img_cds_offset = cds_offset;
+    dfs_cal->img_thrshld = pga_gain;
+    ALOGD("    Done!\n");
+    ALOGD("\n");
+    ALOGD("    CDS Offset = 0x%03X\n", cds_offset);
+    ALOGD("    PGA Gain   = 0x%02X\n", pga_gain);
+    ALOGD("\n");
+    ALOGD("    Time elapsed = %0.3f ms\n", elapsed);
   }
-
-  img_buf = (uint8_t **) malloc(sizeof(uint8_t *) * avg_frame);
-  if (img_buf == NULL) {
-      status = -1;
-      goto calibrate_image_error;
-  }
-
-  // Create image buffers to average
-  for (f = 0; f < avg_frame; f++) {
-      raw_buf[f] = (uint8_t *) malloc(img_size + DFS747_DUMMY_PIXELS);
-      if (raw_buf[f] == NULL) {
-          status = -1;
-          goto calibrate_image_error;
-      }
-      img_buf[f] = &raw_buf[f][DFS747_DUMMY_PIXELS];
-  }
-
-  // Create an image buffer to store averaged result
-  avg_img = (uint8_t *) malloc(img_size);
-  if (avg_img == NULL) {
-      status = -1;
-      goto calibrate_image_error;
-  }
-
-  addr[0] = DFS747_REG_IMG_CDS_CTL_0;
-  addr[1] = DFS747_REG_IMG_CDS_CTL_1;
-  addr[2] = DFS747_REG_IMG_PGA1_CTL;
-
-#if 0
-            cds_offset = DFS747_MAX_CDS_OFFSET;
-            pga_gain   = DFS747_MAX_PGA_GAIN;
-#else
-            cds_offset = DFS747_MAX_CDS_OFFSET - 0x80;
-            pga_gain   = DFS747_MAX_PGA_GAIN   - 0x02;
-#endif
-
-// Switch to image mode
-#if 0
-    status = fps_switch_mode(dev_fd, DFS747_IMAGE_MODE, &mode_old);
-    if (status < 0) {
-        goto calibrate_image2_error;
-    }
-#else
-    status = fps_switch_mode(dev_fd, DFS747_POWER_DOWN_MODE, &mode_old);
-    status = fps_switch_mode(dev_fd, DFS747_IMAGE_MODE, NULL);
-    if (status < 0) {
-        goto calibrate_image_error;
-    }
-#endif
-
-    status = gettimeofday(&start_time, NULL);
-    if (status < 0) {
-        goto calibrate_image_error;
-    }
-
-
-    while (1) {
-        ALOGD("CDS Offset = 0x%03X, PGA Gain = 0x%02X\n", cds_offset, pga_gain);
-
-        // Set CDS Offset and PGA Gain
-        status = fps_multiple_read(dev_fd, addr, data, 3);
-        if (status < 0) {
-            goto calibrate_image_error;
-        }
-
-        data[0] = ((uint8_t) ((cds_offset & 0x0100) >> 1)) | (data[0] & 0x7F);
-        data[1] =  (uint8_t)  (cds_offset & 0x00FF);
-        data[2] = (pga_gain & 0x0F) | (data[2] & 0xF0);
-        dfs_cal->img_cds_offset = cds_offset;
-        dfs_cal->img_thrshld = pga_gain;
-        status = fps_multiple_write(dev_fd, addr, data, 3);
-        if (status < 0) {
-            goto calibrate_image_error;
-        }
-
-        for (f = 0; f < avg_frame; f++) {
-          // Clear all pending events
-          status = fps_single_write(dev_fd, DFS747_REG_INT_EVENT, 0x00);
-          if (status < 0) {
-              goto calibrate_image_error;
-          }
-
-          // Turn on TGEN
-          status = fps_enable_tgen(dev_fd, 1);
-          if (status < 0) {
-              goto calibrate_image_error;
-          }
-
-          // Get a frame
-          status = fps_get_one_image(dev_fd,
-                                     img_width,
-                                     img_height,
-                                     DFS747_DUMMY_PIXELS,
-                                     raw_buf[f]);
-          if (status < 0) {
-              goto calibrate_image_error;
-          }
-
-          // Turn off TGEN
-          status = fps_enable_tgen(dev_fd, 0);
-          if (status < 0) {
-              goto calibrate_image_error;
-          }
-        }
-
-        // Average each frame
-        for (i = 0; i < img_size; i++) {
-            sum = 0.0;
-            for (f = 0; f < avg_frame; f++) {
-                sum += (double) img_buf[f][i];
-            }
-
-            avg_img[i] = (uint8_t) (sum / avg_frame);
-        }
-
-        // Do calibration
-        pix_cnt_over_upper  = 0;
-        pix_cnt_under_lower = 0;
-
-        for (r = row_scan_begin; r <= row_scan_end; r++) {
-        for (c = col_scan_begin; c <= col_scan_end; c++) {
-            if (avg_img[r * DFS747_SENSOR_COLS + c] > upper_bond) {
-                pix_cnt_over_upper++;
-            }
-            if (avg_img[r * DFS747_SENSOR_COLS + c] < lower_bond) {
-                pix_cnt_under_lower++;
-            }
-        }}
-
-        scan_size = (row_scan_end - row_scan_begin + 1) *
-                    (col_scan_end - col_scan_begin + 1);
-
-        img_too_bright = (pix_cnt_over_upper  >= (uint32_t) (((double) scan_size) * ratio));
-        img_too_dark   = (pix_cnt_under_lower >= (uint32_t) (((double) scan_size) * ratio));
-
-        ALOGD("pix_cnt_over_upper = %0d, pix_cnt_under_lower = %0d\n", pix_cnt_over_upper, pix_cnt_under_lower);
-        ALOGD("Scan Size = %0d, Too Bright = %0d, Too Dark = %0d\n", scan_size, img_too_bright, img_too_dark);
-
-        if ((img_too_bright == 0) && (img_too_dark == 0)) {
-            cal_success = 1;
-            break;
-        }
-
-        if (img_too_bright > 0) {
-            if (cds_offset != DFS747_MAX_CDS_OFFSET) {
-                cds_offset++;
-                continue;
-            }
-
-            if (pga_gain != 5) {
-                pga_gain--;
-                cds_offset = DFS747_MAX_CDS_OFFSET;
-                continue;
-            }
-        }
-
-        if (img_too_dark > 0) {
-            if (cds_offset != DFS747_MIN_CDS_OFFSET) {
-                cds_offset--;
-                continue;
-            }
-
-            if (pga_gain != DFS747_MAX_PGA_GAIN) {
-                pga_gain++;
-                cds_offset = DFS747_MAX_CDS_OFFSET;
-                continue;
-            }
-        }
-
-        cal_success = 0;
-        break;
-    }
-
-    status = gettimeofday(&stop_time, NULL);
-    if (status < 0) {
-        goto calibrate_image_error;
-    }
-
-    elapsed = get_elapsed_ms(&start_time, &stop_time);
-    if (elapsed < 0) {
-        goto calibrate_image_error;
-    }
-
-    if (cal_success > 0) {
-        memcpy(dfs_cal->bkg_img, avg_img, img_size);
-        dfs_cal->img_cds_offset = cds_offset;
-        dfs_cal->img_thrshld = pga_gain;
-        ALOGD("    Done!\n");
-        ALOGD("\n");
-        ALOGD("    CDS Offset = 0x%03X\n", cds_offset);
-        ALOGD("    PGA Gain   = 0x%02X\n", pga_gain);
-        ALOGD("\n");
-        ALOGD("    Time elapsed = %0.3f ms\n", elapsed);
-    } else {
-        ALOGD("    Failed!\n");
-    }
-
-    // Free allocated buffers
-    if (avg_img) free(avg_img);
-    for (f = 0; f < avg_frame; f++) {
-        if (raw_buf[f]) free(raw_buf[f]);
-    }
-    if (raw_buf) free(raw_buf);
-    if (img_buf) free(img_buf);
-
 
 
   return status;
 
-calibrate_image_error :
-
-    // Free allocated buffers
-    if (avg_img) free(avg_img);
-    for (f = 0; f < avg_frame; f++) {
-        if (raw_buf[f]) free(raw_buf[f]);
-    }
-    if (raw_buf) free(raw_buf);
-    if (img_buf) free(img_buf);
-
-    ALOGD("\n");
-    ALOGD("calibrate_image    Failed!\n");
-    ALOGD("\n");
-
-    return status;
 
 }
 
@@ -2281,16 +1765,17 @@ int fpsensor_load_user_db(fingerprint_data_t* device, const char* path, uint32_t
     retval = read_calibration_data(tac_handle->user_tpl_storage_path,(unsigned char *)&tac_handle->dfs_cal,sizeof(tac_handle->dfs_cal));
 	if(retval)	{
 		ALOGD("read %s fail,do calibration",tac_handle->user_tpl_storage_path);
+    retval = calibrate_image(device->sysfs_fd,&tac_handle->dfs_cal);
 		retval = calibrate_detect(device->sysfs_fd,&tac_handle->dfs_cal);
-        retval = calibrate_image(device->sysfs_fd,&tac_handle->dfs_cal);
-        write_calibration_data(tac_handle->user_tpl_storage_path,(unsigned char *)&tac_handle->dfs_cal,sizeof(tac_handle->dfs_cal));
+
+    write_calibration_data(tac_handle->user_tpl_storage_path,(unsigned char *)&tac_handle->dfs_cal,sizeof(tac_handle->dfs_cal));
 	}
 	else
 	{
 		ALOGD("read %s success,do setup calibration",tac_handle->user_tpl_storage_path);
 		retval = setup_calibrate_regs(device->sysfs_fd,tac_handle->dfs_cal);
-		retval = calibrate_detect(device->sysfs_fd,&tac_handle->dfs_cal);
-        retval = calibrate_image(device->sysfs_fd,&tac_handle->dfs_cal);
+    retval = calibrate_image(device->sysfs_fd,&tac_handle->dfs_cal);
+    retval = calibrate_detect(device->sysfs_fd,&tac_handle->dfs_cal);
 	}
     ALOGD("detect cds_offset:0x%x  thrshld:0x%x",tac_handle->dfs_cal.detect_cds_offset,tac_handle->dfs_cal.detect_thrshld);
     ALOGD("img cds_offset:0x%x  thrshld:0x%x",tac_handle->dfs_cal.img_cds_offset,tac_handle->dfs_cal.img_thrshld);
