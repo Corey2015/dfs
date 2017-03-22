@@ -54,7 +54,8 @@ LOCAL_SRC_FILES := fingerprint_queue.cpp \
 					 		 	 fps_control/fps_control.c    \
 								 fps_control/fps_detect_calibration.c   \
 								 fps_control/fps_image_calibration.c   \
-								 fps_control/debug.c
+								 fps_control/debug.c\
+								 fps_control/image.c
 
 LOCAL_SHARED_LIBRARIES 	:= 	liblog \
 							libcutils \

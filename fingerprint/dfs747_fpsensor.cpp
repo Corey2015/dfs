@@ -25,6 +25,7 @@
 // for new version code
 #include "fps.h"
 #include "fps_control.h"
+#include "image.h"
 //
 
 #define use fp_algo
@@ -76,9 +77,9 @@ extern int fps_single_write(const int     fd,
                  const uint8_t addr,
                  const uint8_t data);
 
-extern int fps_switch_mode(const int fd,
-                const int mode_new,
-                int       *mode_old);
+//extern int fps_switch_mode(const int fd,
+//                const int mode_new,
+//                int       *mode_old);
 
 extern int fps_search_detect_window(const int      fd,
            const uint8_t  col_scan_begin,
@@ -1080,302 +1081,110 @@ static int get_file_size(const char* path, uint32_t *size)
 
 int get_image(fingerprint_data_t* device, uint8_t *enh_img)
 {
-	int retval = FPSENSOR_ERROR_OK;
+	int status = FPSENSOR_ERROR_OK;
+  uint8_t        *bkgnd_img;
+  double          bkgnd_avg;
+  uint8_t        *finger_img;
+  int             frms_to_avg;
+  int             img_size;
+  int             col_begin;
+  int             col_end;
+  int             row_begin;
+  int             row_end;
+  int             img_width;
+  int             img_height;
+  int             mode_old;
+  double          finger_dr;
+  struct timeval  start_time;
+  struct timeval  stop_time;
+  double          elapsed;
+  char            file[MAX_FNAME_LENGTH];
 	fpsensor_handle_internal_t* tac_handle = (fpsensor_handle_internal_t*) device->tac_handle;
-    int            status     = 0;
-    char           *arg       = NULL;
-    uint8_t        avg_frame  = 1; //modified by corey avg_frame  = 4
-    uint8_t        addr[4];
-    uint8_t        data[4];
-    int            mode_old   = 0;
-    uint8_t        row_begin  = 0;
-    uint8_t        row_end    = DFS747_SENSOR_ROWS - 1;
-    uint8_t        col_begin  = 0;
-    uint8_t        col_end    = DFS747_SENSOR_COLS - 1;
-    uint32_t       img_width  = DFS747_SENSOR_COLS;
-    uint32_t       img_height = DFS747_SENSOR_ROWS;
-    uint32_t       img_size   = (DFS747_SENSOR_COLS * DFS747_SENSOR_ROWS);
-    uint8_t        **raw_buf  = NULL;
-    uint8_t        **img_buf  = NULL;
-    uint8_t        *avg_img   = NULL;
-    uint8_t        *fng_img   = NULL;
-    uint8_t        *raw_bkg   = NULL;
-    double         otsu_mul   = 1.0;
-    uint8_t        otsu_th    = 0;
-    double         intensity  = 0.0;
-    struct timeval start_time;
-    struct timeval stop_time;
-    double         elapsed    = 0.0;
-    time_t         begin_time;
-    struct tm      *ptm;
-    char           file[CHAR_CNT];
-    FILE           *fp        = NULL;
-    double         sum        = 0.0;
-    double         bkg_avg    = 0.0;
-    double         fng_avg    = 0.0;
-    double         fng_dr     = 0.0;
-    uint32_t       enh_range  = 200;
-    uint8_t        pix_min    = 0;
-    uint8_t        pix_max    = 0;
-    double         contrast   = 0.0;
-    double         brightness = 0.0;
-    int            f;
-    int            i;
-    int            j;
 
 
-    memset(enh_img,0,img_size);
-        // Calculate background image average
-        sum = 0.0;
-        for (i = 0; i < img_size; i++) {
-            sum += (double) tac_handle->dfs_cal.bkg_img[i];
-        }
-        bkg_avg = sum / img_size;
+  ALOGD("Getting images......");
+  status = fps_get_sensing_area(fps_handle, FPS_IMAGE_MODE,
+                                &col_begin, &col_end,
+                                &row_begin, &row_end);
+  if (status < 0) {
+      return status;
+  }
 
-        // Switch to image mode
-        status = fps_switch_mode(device->sysfs_fd, DFS747_POWER_DOWN_MODE, &mode_old);
-        status = fps_switch_mode(device->sysfs_fd, DFS747_IMAGE_MODE, NULL);
-        if (status < 0) {
-            goto image_mode_test_error;
-        }
+  img_width  = col_end - col_begin + 1;
+  img_height = row_end - row_begin + 1;
+  img_size   = img_width * img_height;
+  frms_to_avg = 1 ;
 
-        status = gettimeofday(&start_time, NULL);
-        if (status < 0) {
-            goto image_mode_test_error;
-        }
-
-        // Repeat to aquire and average frames
-            img_buf = (uint8_t **) malloc(sizeof(uint8_t *) * avg_frame);
-            if (img_buf == NULL) {
-                status = -1;
-                goto image_mode_test_error;
-            }
-
-            raw_buf = (uint8_t **) malloc(sizeof(uint8_t *) * avg_frame);
-            if (raw_buf == NULL) {
-                status = -1;
-                goto image_mode_test_error;
-            }
-
-            // Create image buffers to average
-            for (f = 0; f < avg_frame; f++) {
-                raw_buf[f] = (uint8_t *) malloc(img_size + DFS747_DUMMY_PIXELS);
-                if (raw_buf[f] == NULL) {
-                    status = -1;
-                    goto image_mode_test_error;
-                }
-                img_buf[f] = &raw_buf[f][DFS747_DUMMY_PIXELS];
-            }
-
-            // Create an image buffer to store averaged result
-            avg_img = (uint8_t *) malloc(img_size);
-            if (avg_img == NULL) {
-                status = -1;
-                goto image_mode_test_error;
-            }
+  bkgnd_img = (uint8_t *) malloc(img_size);
+  memset(enh_img,0,img_size);
 
 
-            // Create an image buffer for finger only
-            fng_img = (uint8_t *) malloc(img_size);
-            if (fng_img == NULL) {
-                status = -1;
-                goto image_mode_test_error;
-            }
+  if (bkgnd_img == NULL) {
+      status = -1;
+      goto image_mode_test_error;
+  }
 
-            for (f = 0; f < avg_frame; f++) {
-                // Clear all pending events
-                status = fps_single_write(device->sysfs_fd, DFS747_REG_INT_EVENT, 0x00);
-                if (status < 0) {
-                    goto image_mode_test_error;
-                }
+  finger_img = (uint8_t *) malloc(img_size);
+  if (finger_img == NULL) {
+      status = -1;
+      goto image_mode_test_error;
+  }
 
-                // Turn on TGEN
-                status = fps_enable_tgen(device->sysfs_fd, 1);
-                if (status < 0) {
-                    goto image_mode_test_error;
-                }
+  status = gettimeofday(&start_time, NULL);
+  if (status < 0) {
+      goto image_mode_test_error;
+  }
 
-                // Get a frame
-                status = fps_get_one_image(device->sysfs_fd,
-                                           img_width,
-                                           img_height,
-                                           DFS747_DUMMY_PIXELS,
-                                           raw_buf[f]);
-                if (status < 0) {
-                    goto image_mode_test_error;
-                }
+  status = fps_switch_mode(fps_handle, FPS_IMAGE_MODE, &mode_old);
+  if (status < 0) {
+      goto image_mode_test_error;
+  }
 
-                // Turn off TGEN
-                status = fps_enable_tgen(device->sysfs_fd, 0);
-                if (status < 0) {
-                    goto image_mode_test_error;
-                }
-            }
+  status = fps_get_finger_image(fps_handle,
+                                img_width,
+                                img_height,
+                                frms_to_avg,
+                                finger_img,
+                                &finger_dr,
+                                NULL, NULL);
 
-            // Average each frames
-            for (i = 0; i < img_size; i++) {
-                sum = 0.0;
-                for (f = 0; f < avg_frame; f++) {
-                    sum += (double) img_buf[f][i];
-                }
+  ALOGD("    Image DR = %0.3f", finger_dr);
+  if (status < 0) {
+      goto image_mode_test_error;
+  }
 
-                avg_img[i] = (uint8_t) (sum / avg_frame);
-            }
+  status = fps_switch_mode(fps_handle, mode_old, NULL);
+  if (status < 0) {
+      goto image_mode_test_error;
+  }
 
-            // Save (averaged) image
-            // sprintf(file, "%s/average.bmp", line);
-            // fpsensor_save_bitmap(file, avg_img,DFS747_SENSOR_ROWS,DFS747_SENSOR_COLS);
-            // if (status < 0) {
-            //     goto image_mode_test_error;
-            // }
+  sprintf(file, "/data/system/users/0/fpdata/dolfa/%d.bmp",start_time.tv_sec);
+  ALOGD("Save_bmp :%s\n",file);
+  save_bmp(file, finger_img,img_size);
+  memcpy(enh_img,finger_img,img_size);
 
-            // Calculate finger image average
-            sum = 0.0;
-            for (i = 0; i < img_size; i++) {
-                sum += (double) avg_img[i];
-            }
-            fng_avg = sum / img_size;
+  status = gettimeofday(&stop_time, NULL);
+  if (status < 0) {
+      goto image_mode_test_error;
+  }
 
-#if 0
-            // Calculate finger image deviation
-            sum = 0.0;
-            for (i = 0; i < img_size; i++) {
-            }
-#endif
-
-            // Extract fingerprint
-            for (i = 0; i < img_size; i++) {
-                if (avg_img[i] > tac_handle->dfs_cal.bkg_img[i]) {
-                    fng_img[i] = 0xFF - (avg_img[i] - tac_handle->dfs_cal.bkg_img[i]);
-                } else {
-                    fng_img[i] = 0xFF;
-                }
-            }
-
-            // Calculate dynamic range
-            fng_dr = fng_avg - bkg_avg;
-
-            // Save finger image
-            // sprintf(file, "%s/finger.bmp", line);
-            // fpsensor_save_bitmap(file, fng_img,DFS747_SENSOR_ROWS,DFS747_SENSOR_COLS);
-            // if (status < 0) {
-            //     goto image_mode_test_error;
-            // }
-
-            //modify by corey
-	    #if 0
-            if (otsu_mul > 0.0) {
-                // Find Otsu threshold
-                otsu_th = find_otsu_th(fng_img, img_size);
-                ALOGD("%s(): Enhancement Th. = %0d\n", __func__, otsu_th);
-
-                for (i = 0; i < img_size; i++) {
-                    intensity = (double) fng_img[i];
-
-                    if (intensity > (double) otsu_th) {
-                        intensity += ((intensity - (double) otsu_th) * otsu_mul + 0.5);
-                        if (intensity > 255.0) {
-                            intensity = 255.0;
-                        }
-                    } else {
-                        intensity -= (((double) otsu_th - intensity) * otsu_mul + 0.5);
-                        if (intensity < 0.0) {
-                            intensity = 0.0;
-                        }
-                    }
-
-                    enh_img[i] = (uint8_t) intensity;
-                }
-            }
-
-            if (enh_range > 0) {
-                // Find the min. and max. value in this image
-                find_pixel_range(enh_img, img_size, &pix_min, &pix_max);
-                ALOGD("%s(): (Before) pix_min = %0d, pix_max = %0d\n", __func__, pix_min, pix_max);
-
-                // Use contrast/brightness to enhance the image
-                contrast   = ((double) enh_range) / ((double) pix_max - (double) pix_min);
-                brightness = (((double) pix_max + (double) pix_min) / 2) * contrast - 128.0;
-                ALOGD("%s(): contrast = %0.3f, brightness = %0.3f\n", __func__, contrast, brightness);
-
-                for (i = 0; i < img_size; i++) {
-                    intensity = enh_img[i] * contrast - brightness;
-
-                    if (intensity > 255.0) {
-                        intensity = 255.0;
-                    }
-                    else if (intensity < 0.0) {
-                        intensity = 0.0;
-                    }
-
-                    enh_img[i] = (uint8_t) intensity;
-                }
-
-                // Find the min. and max. value in this image
-                find_pixel_range(enh_img, img_size, &pix_min, &pix_max);
-                ALOGD("%s(): (After) pix_min = %0d, pix_max = %0d\n", __func__, pix_min, pix_max);
-            }
-            // Save enhanced image
-            sprintf(file, "%s/enhanced.bmp", line);
-            fpsensor_save_bitmap(file, enh_img,DFS747_SENSOR_ROWS,DFS747_SENSOR_COLS);
-            if (status < 0) {
-                goto image_mode_test_error;
-            }
-	    #endif
-
-            //add by corey 2016/05/31
-			      sprintf(file, "/data/system/users/0/fpdata/dolfa/%d.bmp",start_time.tv_sec);
-            ALOGD("Save_bmp :%s\n",file);
-            fpsensor_save_bitmap(file, fng_img,DFS747_SENSOR_ROWS,DFS747_SENSOR_COLS);
-            memcpy(enh_img,fng_img,DFS747_SENSOR_ROWS*DFS747_SENSOR_COLS);
-
-            //memcpy(enh_img,avg_img,DFS747_SENSOR_ROWS*DFS747_SENSOR_COLS);
-            // Free allocated buffers
-            if (fng_img) free(fng_img);
-            if (avg_img) free(avg_img);
-            for (f = 0; f < avg_frame; f++) {
-                if (raw_buf[f]) free(raw_buf[f]);
-            }
-            if (raw_buf) free(raw_buf);
-            if (img_buf) free(img_buf);
-
-            // Display DR
-            ALOGD("    Image Dynamic Range = %0.3f\n", fng_dr);
-
-        status = gettimeofday(&stop_time, NULL);
-        if (status < 0) {
-            goto image_mode_test_error;
-        }
-
-
-        // Switch back to original mode
-//        status = fps_switch_mode(device->sysfs_fd, DFS747_POWER_DOWN_MODE, NULL);
-//        status = fps_switch_mode(device->sysfs_fd, mode_old, NULL);
-        //status = fps_switch_mode(device->sysfs_fd, mode_old, &mode_old);
-        if (status < 0) {
-            goto image_mode_test_error;
-        }
-
-		//fps_single_write(device->sysfs_fd, DFS747_REG_INT_EVENT, 0x00);
-        ALOGD("    Done!\n");
-
-    return status;
+  elapsed = get_elapsed_ms(&start_time, &stop_time);
+  if (elapsed < 0) {
+      goto image_mode_test_error;
+  }
+  ALOGD("getimage Time Elapsed = %0.3f ms\n", elapsed);
+  //memcpy(enh_img,avg_img,DFS747_SENSOR_ROWS*DFS747_SENSOR_COLS);
+  // Free allocated buffers
+  return status;
 
 image_mode_test_error :
 
     // Free allocated buffers
-    if (raw_bkg) free(raw_bkg);
-    if (fng_img) free(fng_img);
-    if (avg_img) free(avg_img);
-    for (f = 0; f < avg_frame; f++) {
-        if (raw_buf[f]) free(raw_buf[f]);
-    }
-    if (raw_buf) free(raw_buf);
-    if (img_buf) free(img_buf);
+    if (finger_img) free(finger_img);
+    if (bkgnd_img) free(finger_img);
 
-    ALOGD("    Failed!\n");
-    ALOGD("\n");
 
+    ALOGD("Getimage failed!\n");
     return status;
 }
 
@@ -1614,8 +1423,8 @@ int32_t dfs747_sleep(fingerprint_data_t* device,int sleep)
 
         // Switch to detect mode
         //retval = fps_switch_mode(device->sysfs_fd, DFS747_DETECT_MODE, &mode_old);
-        retval = fps_switch_mode(device->sysfs_fd, DFS747_POWER_DOWN_MODE, &mode_old);
-        retval = fps_switch_mode(device->sysfs_fd, DFS747_DETECT_MODE, NULL);
+        retval = fps_switch_mode(fps_handle, DFS747_POWER_DOWN_MODE, &mode_old);
+        retval = fps_switch_mode(fps_handle, DFS747_DETECT_MODE, NULL);
 		    // Disable interrupt and clear pending events
 	    addr[0] = DFS747_REG_INT_CTL;
 	    addr[1] = DFS747_REG_INT_EVENT;
@@ -1917,13 +1726,13 @@ int32_t dfs747_device_init(fingerprint_data_t *device)
   	tac_handle->height = DFS747_SENSOR_ROWS;
     tac_handle->last_match_ID = -1;
     device->tac_handle = tac_handle;
-	device->sensor_init=dfs747_sensor_init;
+	device->sensor_init=dfs747_sensor_init; // ok
 	device->sensor_deinit =dfs747_sensor_deinit;
 	device->sleep = dfs747_sleep;
 	device->check_finger_present = dfs747_detect_finger;
 
-	device->capture_image = dfs747_captureImage;
-	device->calibrate = dfs747_calibrate;
+	device->capture_image = dfs747_captureImage;//OK
+	device->calibrate = dfs747_calibrate; //ok
 	device->begin_enroll =dfs747_begin_enrol;
 	device->enroll = dfs747_enrol;
 	device->end_enroll = dfs747_end_enrol;
