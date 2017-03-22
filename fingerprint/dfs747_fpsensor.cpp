@@ -1082,8 +1082,6 @@ static int get_file_size(const char* path, uint32_t *size)
 int get_image(fingerprint_data_t* device, uint8_t *enh_img)
 {
 	int status = FPSENSOR_ERROR_OK;
-  uint8_t        *bkgnd_img;
-  double          bkgnd_avg;
   uint8_t        *finger_img;
   int             frms_to_avg;
   int             img_size;
@@ -1114,15 +1112,7 @@ int get_image(fingerprint_data_t* device, uint8_t *enh_img)
   img_height = row_end - row_begin + 1;
   img_size   = img_width * img_height;
   frms_to_avg = 1 ;
-
-  bkgnd_img = (uint8_t *) malloc(img_size);
   memset(enh_img,0,img_size);
-
-
-  if (bkgnd_img == NULL) {
-      status = -1;
-      goto image_mode_test_error;
-  }
 
   finger_img = (uint8_t *) malloc(img_size);
   if (finger_img == NULL) {
@@ -1153,10 +1143,10 @@ int get_image(fingerprint_data_t* device, uint8_t *enh_img)
       goto image_mode_test_error;
   }
 
-  status = fps_switch_mode(fps_handle, mode_old, NULL);
-  if (status < 0) {
-      goto image_mode_test_error;
-  }
+  //status = fps_switch_mode(fps_handle, mode_old, NULL);
+  //if (status < 0) {
+  //    goto image_mode_test_error;
+  //}
 
   sprintf(file, "/data/system/users/0/fpdata/dolfa/%d.bmp",start_time.tv_sec);
   ALOGD("Save_bmp :%s\n",file);
@@ -1181,8 +1171,6 @@ image_mode_test_error :
 
     // Free allocated buffers
     if (finger_img) free(finger_img);
-    if (bkgnd_img) free(finger_img);
-
 
     ALOGD("Getimage failed!\n");
     return status;
